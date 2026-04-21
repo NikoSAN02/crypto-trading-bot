@@ -21,6 +21,7 @@ from strategies.enhanced_strategies import (
     RateTracker, FundingTimer, should_enter_enhanced, should_exit_enhanced,
     fetch_cross_exchange_rates
 )
+from risk.risk_manager import VolatilityAdjustedSizer, CorrelationCap, PerformanceMetrics
 
 
 class PaperTrader:
@@ -37,6 +38,11 @@ class PaperTrader:
         # Enhanced features
         self.rate_tracker = RateTracker(max_history=12)
         self.funding_timer = FundingTimer()
+
+        # Risk management (from ai-hedge-fund patterns)
+        self.vol_sizer = VolatilityAdjustedSizer(min_alloc_pct=8, max_alloc_pct=25)
+        self.correlation_cap = CorrelationCap(correlation_threshold=0.8, reduction_multiplier=0.7)
+        self.metrics = PerformanceMetrics()
 
         # Leverage config (safest approach: 3x)
         self.leverage = 3
@@ -224,11 +230,32 @@ class PaperTrader:
         return opportunities[:5]
 
     def open_position(self, opp):
-        """Paper-trade: open a leveraged funding arb position."""
+        """Paper-trade: open a leveraged funding arb position with volatility-adjusted sizing."""
         available = self.get_available()
-        # With leverage, we can open larger positions with less capital
-        max_notional = self.max_position_usd * self.leverage
-        margin_needed = min(self.max_position_usd, available * 0.4)
+
+        # --- Volatility-adjusted position sizing (from ai-hedge-fund) ---
+        stability = opp.get("confidence", 0.5)
+        if "stability" in opp:
+            stability = opp["stability"]
+        else:
+            # Use rate tracker if available
+            stability = self.rate_tracker.get_stability(opp["symbol"])
+
+        margin_needed = self.vol_sizer.calculate_size(
+            self.balance, stability, opp.get("confidence", 0.5)
+        )
+
+        # Apply correlation cap — reduce size if positions are correlated
+        all_symbols = list(self.positions.keys()) + [opp["symbol"]]
+        corr_multiplier = self.correlation_cap.get_exposure_multiplier(
+            self.rate_tracker, all_symbols
+        )
+        margin_needed *= corr_multiplier
+
+        # Clamp to available
+        margin_needed = min(margin_needed, available * 0.4)
+        margin_needed = min(margin_needed, self.max_position_usd)
+
         if margin_needed < 10:
             return None
 
@@ -292,6 +319,10 @@ class PaperTrader:
         total_pnl = price_pnl + funding_pnl - pos["fee_paid"] - fee
 
         self.balance += net + funding_pnl
+
+        # Record trade PnL for performance metrics
+        self.metrics.record_trade(total_pnl)
+        self.metrics.update(self.balance)
 
         self.trade_log.append({
             "time": datetime.now(timezone.utc).isoformat(),
@@ -390,6 +421,7 @@ class PaperTrader:
             "positions": self.positions,
             "trade_log": self.trade_log,
             "balance_history": self.balance_history[-100:],
+            "metrics": self.metrics.get_summary(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -407,6 +439,11 @@ class PaperTrader:
             self.positions = state.get("positions", {})
             self.trade_log = state.get("trade_log", [])
             self.balance_history = state.get("balance_history", [])
+            # Restore metrics from trade log
+            for t in self.trade_log:
+                if t.get("action") == "CLOSE" and "total_pnl" in t:
+                    self.metrics.record_trade(t["total_pnl"])
+            self.metrics.update(self.balance)
             return True
         except Exception:
             return False
@@ -435,6 +472,23 @@ class PaperTrader:
         print(f"  Available:  ${self.get_available():.2f}")
         print(f"  Positions:  {len(self.positions)}/{self.max_positions}")
         print(f"  Funding:    +${self.total_funding_collected:.2f} total collected")
+
+        # Performance metrics (from ai-hedge-fund risk manager)
+        m = self.metrics.get_summary()
+        sharpe = f"{m['sharpe_ratio']:.2f}" if m["sharpe_ratio"] is not None else "n/a"
+        sortino = f"{m['sortino_ratio']:.2f}" if m["sortino_ratio"] is not None else "n/a"
+        win_rate = f"{m['win_rate_pct']:.0f}%" if m["win_rate_pct"] is not None else "n/a"
+        pf = f"{m['profit_factor']:.2f}" if m["profit_factor"] is not None else "n/a"
+        print(f"  Sharpe:     {sharpe}  Sortino: {sortino}  Max DD: {m['max_drawdown_pct']:.1f}%")
+        print(f"  Win Rate:   {win_rate}  Profit Factor: {pf}  Trades: {m['total_trades']}")
+
+        # Correlation warning
+        if len(self.positions) >= 2:
+            corr = self.correlation_cap.get_correlation_score(
+                self.rate_tracker, list(self.positions.keys())
+            )
+            if corr > 0.5:
+                print(f"  ⚠ Correlation: {corr:.0%} — exposure auto-reduced")
 
         # Portfolio risk
         risk_ok, risk_msg = self.check_portfolio_risk()
@@ -543,6 +597,7 @@ class PaperTrader:
             "time": datetime.now(timezone.utc).isoformat(),
             "balance": round(self.balance, 2),
         })
+        self.metrics.update(self.balance)
         self.save_state()
 
         self.print_dashboard(signal)
