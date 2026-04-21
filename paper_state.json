@@ -1,69 +1,56 @@
 {
-  "balance": 199.94931614720002,
+  "balance": 199.892,
   "starting_balance": 200,
   "positions": {
     "M": {
       "symbol": "M",
-      "amount": 11.735982,
-      "entry_price": 4.089985899999999,
-      "entry_funding_rate": 0.00158472,
-      "entry_apy": 173.5,
-      "entry_time": "2026-04-21T12:02:37.655196+00:00",
-      "usd_value": 48.0,
-      "fee_paid": 0.0288,
-      "funding_collected": 0.07606656143045352,
+      "amount": 42.989357,
+      "entry_price": 4.187082899999999,
+      "entry_funding_rate": 0.00089456,
+      "entry_apy": 98.0,
+      "entry_time": "2026-04-21T17:28:11.162168+00:00",
+      "usd_value": 180,
+      "margin": 60,
+      "leverage": 3,
+      "fee_paid": 0.10799999999999998,
+      "funding_collected": 0.49483259999999996,
       "confidence": 0.24999999999999997,
-      "entry_reason": "recent spike detected \u2014 may revert | long wait (237m to funding)"
-    },
-    "NAORIS": {
-      "symbol": "NAORIS",
-      "amount": 512.074364,
-      "entry_price": 0.07122615499999999,
-      "entry_funding_rate": 0.00047676,
-      "entry_apy": 52.2,
-      "entry_time": "2026-04-21T12:02:51.536003+00:00",
-      "usd_value": 36.473088000000004,
-      "fee_paid": 0.0218838528,
-      "funding_collected": 0,
-      "confidence": 0.24999999999999997,
-      "entry_reason": "recent spike detected \u2014 may revert | long wait (237m to funding)"
+      "entry_reason": "recent spike detected \u2014 may revert | long wait (391m to funding)"
     }
   },
   "trade_log": [
     {
-      "time": "2026-04-21T12:02:37.655196+00:00",
+      "time": "2026-04-21T17:28:11.162168+00:00",
       "action": "OPEN",
       "symbol": "M",
-      "price": 4.089985899999999,
-      "amount": 11.73598177930149,
-      "usd_value": 48.0,
-      "fee": 0.0288,
-      "apy": 173.5
-    },
-    {
-      "time": "2026-04-21T12:02:51.536003+00:00",
-      "action": "OPEN",
-      "symbol": "NAORIS",
-      "price": 0.07122615499999999,
-      "amount": 512.0743636940673,
-      "usd_value": 36.473088000000004,
-      "fee": 0.0218838528,
-      "apy": 52.2
+      "price": 4.187082899999999,
+      "amount": 42.98935662343825,
+      "usd_value": 180,
+      "fee": 0.10799999999999998,
+      "apy": 98.0
     }
   ],
   "balance_history": [
     {
-      "time": "2026-04-21T12:02:36.412366+00:00",
+      "time": "2026-04-21T17:28:09.801897+00:00",
       "balance": 200
     },
     {
-      "time": "2026-04-21T12:02:37.655243+00:00",
-      "balance": 199.97
+      "time": "2026-04-21T17:28:11.162216+00:00",
+      "balance": 199.89
     },
     {
-      "time": "2026-04-21T12:02:51.536041+00:00",
-      "balance": 199.95
+      "time": "2026-04-21T17:29:55.969142+00:00",
+      "balance": 199.89
+    },
+    {
+      "time": "2026-04-21T17:30:57.257914+00:00",
+      "balance": 199.89
+    },
+    {
+      "time": "2026-04-21T17:31:58.636571+00:00",
+      "balance": 199.89
     }
   ],
-  "updated_at": "2026-04-21T12:02:51.536046+00:00"
+  "updated_at": "2026-04-21T17:31:58.636580+00:00"
 }

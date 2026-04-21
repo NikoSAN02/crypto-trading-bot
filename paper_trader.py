@@ -38,12 +38,21 @@ class PaperTrader:
         self.rate_tracker = RateTracker(max_history=12)
         self.funding_timer = FundingTimer()
 
-        # Risk config (same as real bot)
-        self.max_position_usd = 50
-        self.max_positions = 3
-        self.reserve_pct = 20
-        self.slippage_pct = 0.1  # 0.1% simulated slippage
-        self.fee_pct = 0.06  # Bybit taker fee
+        # Leverage config (safest approach: 3x)
+        self.leverage = 3
+        self.liquidation_buffer_pct = 50  # Close if price moves 50% toward liquidation
+        self.max_leverage_drawdown_pct = 30  # Hard stop: close all if equity drops 30%
+
+        # Position config (wider net)
+        self.max_position_usd = 60  # Larger positions with leverage
+        self.max_positions = 5  # More diversification
+        self.reserve_pct = 15  # Less idle cash, more deployed
+        self.slippage_pct = 0.1
+        self.fee_pct = 0.06
+
+        # Risk tracking
+        self.peak_balance = starting_balance
+        self.total_funding_collected = 0
 
     def _fetch_json(self, url, timeout=10):
         try:
@@ -54,11 +63,20 @@ class PaperTrader:
             return None
 
     def get_available(self):
-        """Available balance minus reserve and open position value."""
-        open_value = sum(p["usd_value"] for p in self.positions.values())
-        available = self.balance - open_value
+        """Available balance minus reserve and open position value (accounting for leverage)."""
+        # With leverage, our margin is position_value / leverage
+        margin_used = sum(p["usd_value"] / self.leverage for p in self.positions.values())
+        available = self.balance - margin_used
         reserved = available * (self.reserve_pct / 100)
         return max(0, available - reserved)
+
+    def get_total_exposure(self):
+        """Total notional exposure across all positions."""
+        return sum(p["usd_value"] for p in self.positions.values())
+
+    def get_equity(self):
+        """Current equity = balance + unrealized PnL."""
+        return self.balance + self.total_funding_collected
 
     # ─── Data Fetching ─────────────────────────────────────────
 
@@ -206,18 +224,23 @@ class PaperTrader:
         return opportunities[:5]
 
     def open_position(self, opp):
-        """Paper-trade: open a funding arb position."""
+        """Paper-trade: open a leveraged funding arb position."""
         available = self.get_available()
-        size = min(self.max_position_usd, available * 0.3)
-        if size < 10:
+        # With leverage, we can open larger positions with less capital
+        max_notional = self.max_position_usd * self.leverage
+        margin_needed = min(self.max_position_usd, available * 0.4)
+        if margin_needed < 10:
             return None
+
+        # Notional position = margin * leverage
+        notional = margin_needed * self.leverage
 
         price = opp["price"]
         # Apply slippage
         buy_price = price * (1 + self.slippage_pct / 100)
-        amount = size / buy_price
-        fee = size * (self.fee_pct / 100)
-        usd_value = size
+        amount = notional / buy_price
+        fee = notional * (self.fee_pct / 100)
+        usd_value = notional
 
         position = {
             "symbol": opp["symbol"],
@@ -227,6 +250,8 @@ class PaperTrader:
             "entry_apy": opp["apy"],
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "usd_value": usd_value,
+            "margin": margin_needed,
+            "leverage": self.leverage,
             "fee_paid": fee,
             "funding_collected": 0,
             "confidence": opp.get("confidence", 0.5),
@@ -286,22 +311,21 @@ class PaperTrader:
         return {"total_pnl": total_pnl, "price_pnl": price_pnl, "funding_pnl": funding_pnl}
 
     def collect_funding(self, funding_rates):
-        """Simulate funding payment collection for open positions."""
+        """Simulate funding payment collection — amplified by leverage."""
         rate_map = {r["symbol"]: r for r in funding_rates}
         for symbol, pos in self.positions.items():
             rate_info = rate_map.get(symbol)
             if not rate_info:
                 continue
-            # Funding is paid on notional value
-            notional = pos["amount"] * pos["entry_price"]
+            # Funding is paid on NOTIONAL value (margin * leverage)
+            notional = pos["usd_value"]  # This is already the leveraged notional
             # 8-hour funding payment
             payment = notional * rate_info["funding_rate"]
             if pos["entry_funding_rate"] > 0:
-                # We're short, we collect positive funding
                 pos["funding_collected"] += payment
             else:
-                # We're long, we collect negative funding
                 pos["funding_collected"] += abs(payment)
+            self.total_funding_collected += abs(payment)
 
     def check_exit_conditions(self, funding_rates):
         """Check if any positions should be closed using enhanced exit logic."""
@@ -314,6 +338,7 @@ class PaperTrader:
                 continue
 
             current_rate = rate_info["funding_rate"]
+            current_price = rate_info["price"]
 
             # Record for tracking
             self.rate_tracker.record(symbol, current_rate)
@@ -325,8 +350,37 @@ class PaperTrader:
 
             if should_exit:
                 to_close.append((symbol, reason, rate_info["price"]))
+                continue
+
+            # Liquidation protection for leveraged positions
+            entry_price = pos["entry_price"]
+            price_move_pct = abs(current_price - entry_price) / entry_price * 100
+
+            # At 3x leverage, liquidation is at ~33% adverse move
+            # We close at 20% adverse move (before liquidation)
+            liq_threshold = 100 / pos.get("leverage", 3) * 0.6  # 60% of way to liquidation
+            if price_move_pct > liq_threshold:
+                to_close.append((
+                    symbol,
+                    f"LIQ PROTECT: price moved {price_move_pct:.0f}% (threshold: {liq_threshold:.0f}%)",
+                    current_price
+                ))
 
         return to_close
+
+    def check_portfolio_risk(self):
+        """Portfolio-level risk check — close all if drawdown too deep."""
+        equity = self.get_equity()
+        if self.peak_balance:
+            drawdown = ((self.peak_balance - equity) / self.peak_balance) * 100
+        else:
+            drawdown = 0
+
+        self.peak_balance = max(self.peak_balance, equity)
+
+        if drawdown > self.max_leverage_drawdown_pct:
+            return True, f"Portfolio drawdown {drawdown:.1f}% exceeds limit {self.max_leverage_drawdown_pct}%"
+        return False, ""
 
     def save_state(self):
         """Save paper trading state to disk."""
@@ -363,19 +417,29 @@ class PaperTrader:
         """Print full trading dashboard."""
         pnl = self.balance - self.starting_balance
         pnl_pct = (pnl / self.starting_balance) * 100
+        exposure = self.get_total_exposure()
+        equity = self.get_equity()
 
         print("\n" + "=" * 60)
         print("  PAPER TRADING DASHBOARD")
         print("=" * 60)
 
-        # Balance
+        # Balance with leverage context
         if pnl >= 0:
-            print(f"  Balance:  ${self.balance:.2f}  (+${pnl:.2f} / +{pnl_pct:.1f}%)")
+            print(f"  Balance:    ${self.balance:.2f}  (+${pnl:.2f} / +{pnl_pct:.1f}%)")
         else:
-            print(f"  Balance:  ${self.balance:.2f}  (${pnl:.2f} / {pnl_pct:.1f}%)")
+            print(f"  Balance:    ${self.balance:.2f}  (${pnl:.2f} / {pnl_pct:.1f}%)")
+        print(f"  Equity:     ${equity:.2f}  (balance + funding)")
+        print(f"  Exposure:   ${exposure:.0f}  ({self.leverage}x leverage)")
+        print(f"  Margin:     ${exposure/self.leverage:.0f}  used")
+        print(f"  Available:  ${self.get_available():.2f}")
+        print(f"  Positions:  {len(self.positions)}/{self.max_positions}")
+        print(f"  Funding:    +${self.total_funding_collected:.2f} total collected")
 
-        print(f"  Available: ${self.get_available():.2f}")
-        print(f"  Positions: {len(self.positions)}/{self.max_positions}")
+        # Portfolio risk
+        risk_ok, risk_msg = self.check_portfolio_risk()
+        if not risk_ok and risk_msg:
+            print(f"  RISK ALERT: {risk_msg}")
 
         # Signal
         if signal:
@@ -400,9 +464,12 @@ class PaperTrader:
                 stability = self.rate_tracker.get_stability(sym)
                 momentum = self.rate_tracker.get_momentum(sym)
                 conf = pos.get("confidence", 0)
-                print(f"    {sym:<10} ${pos['usd_value']:.0f} @ {pos['entry_apy']:+.0f}% APY  "
-                      f"held: {held_hours:.0f}h  funding: ${pos['funding_collected']:.2f}  "
-                      f"conf: {conf:.0%}  stable: {stability:.0%}  trend: {momentum}")
+                lev = pos.get("leverage", 1)
+                margin = pos.get("margin", pos["usd_value"])
+                print(f"    {sym:<10} ${pos['usd_value']:>.0f} notional ({lev}x, ${margin:.0f} margin)  "
+                      f"@ {pos['entry_apy']:+.0f}% APY  funding: ${pos['funding_collected']:.2f}")
+                print(f"              conf: {conf:.0%}  stable: {stability:.0%}  "
+                      f"trend: {momentum}  held: {held_hours:.0f}h")
         else:
             print("\n  No open positions")
 
