@@ -1,7 +1,26 @@
+"""
+Crypto Trading Bot — Bybit Funding Rate Arbitrage
+
+Usage:
+  python main.py              # Scan only (no trading)
+  python main.py --trade      # Scan + auto-trade
+  python main.py --status     # Check positions
+  python main.py --close-all  # Close all positions
+"""
+
 import ccxt
-import json
+import sys
 import time
+import json
+from datetime import datetime, timezone
+
 from config import API_KEY, API_SECRET, EXCHANGE_ID, SANDBOX
+from strategies.funding_arb import FundingArbEngine
+from risk.position_manager import PositionManager
+from alerts.telegram_alerts import (
+    send_alert, format_funding_opportunity,
+    format_position_open, format_position_close, format_risk_report,
+)
 
 
 def create_exchange():
@@ -10,9 +29,8 @@ def create_exchange():
     exchange = exchange_class({
         "apiKey": API_KEY,
         "secret": API_SECRET,
-        "options": {
-            "defaultType": "unified",  # Unified trading account
-        },
+        "options": {"defaultType": "unified"},
+        "enableRateLimit": True,
     })
 
     if SANDBOX:
@@ -23,96 +41,139 @@ def create_exchange():
     return exchange
 
 
-def get_balance(exchange):
-    """Get account balance."""
-    balance = exchange.fetch_balance()
-    total = balance.get("total", {})
-    free = balance.get("free", {})
+def scan_mode(engine):
+    """Just scan for opportunities, don't trade."""
+    opportunities = engine.scan_opportunities(top_n=15)
 
-    print("\n=== Account Balance ===")
-    for coin in ["USDT", "BTC", "ETH", "SOL"]:
-        if total.get(coin, 0) > 0:
-            print(f"  {coin}: free={free.get(coin, 0):.6f}  total={total.get(coin, 0):.6f}")
+    if not opportunities:
+        print("\nNo opportunities found (min rate: {:.1f}% APY)".format(
+            engine.min_annual_rate
+        ))
+        return
 
-    return balance
+    print(f"\n{'='*60}")
+    print(f"  TOP FUNDING RATE OPPORTUNITIES")
+    print(f"{'='*60}")
+    for i, opp in enumerate(opportunities, 1):
+        direction = "SHORT (collect)" if opp["fundingRate"] > 0 else "LONG"
+        print(f"\n  {i}. {opp['symbol']}")
+        print(f"     Rate: {opp['fundingRate']:+.6f}  |  APY: {opp['annualized']:+.1f}%")
+        print(f"     Strategy: Buy spot + {direction} perp")
+        print(f"     24h Volume: ${opp['volume_24h']:,.0f}")
+
+    print(f"\n{'='*60}")
+    print(f"  Run with --trade to auto-execute top opportunities")
+    print(f"{'='*60}")
 
 
-def get_funding_rates(exchange, limit=20):
-    """Fetch funding rates for all perpetual contracts, sorted by rate."""
-    markets = exchange.markets
-    perp_markets = [
-        m for m in markets.values()
-        if m.get("swap") and m.get("active") and "/USDT" in m["symbol"]
-    ]
+def trade_mode(exchange, engine, pm):
+    """Scan + auto-trade the best opportunities."""
+    # Pre-check
+    report = pm.get_risk_report()
+    print(format_risk_report(report))
 
-    funding_rates = []
-    for market in perp_markets:
-        try:
-            ticker = exchange.fetch_funding_rate(market["symbol"])
-            rate = ticker.get("fundingRate", 0)
-            if rate and abs(rate) > 0.0001:  # Filter noise
-                funding_rates.append({
-                    "symbol": market["symbol"],
-                    "fundingRate": rate,
-                    "annualized": rate * 3 * 365 * 100,  # 3 payments/day, annual %
-                    "markPrice": ticker.get("markPrice"),
-                    "nextFunding": ticker.get("nextFundingTime"),
-                })
-        except Exception:
+    if not report["safe_to_trade"]:
+        send_alert("🚨 Trading halted — drawdown limit exceeded")
+        return
+
+    # Check existing positions
+    if engine.positions:
+        print("\n[CHECK] Reviewing existing positions...")
+        engine.check_positions()
+
+    # Scan for new opportunities
+    opportunities = engine.scan_opportunities(top_n=5)
+    if not opportunities:
+        print("\nNo new opportunities found")
+        return
+
+    available, _ = pm.get_available_balance()
+    print(f"\nAvailable for trading: ${available:.2f}")
+
+    # Execute top opportunities
+    for opp in opportunities:
+        if opp["symbol"] in engine.positions:
             continue
 
-    # Sort by absolute funding rate descending
-    funding_rates.sort(key=lambda x: abs(x["fundingRate"]), reverse=True)
-    return funding_rates[:limit]
+        ok, reason = pm.pre_trade_check(opp["symbol"], engine.max_position_usd)
+        if not ok:
+            print(f"  [RISK] Skipping {opp['symbol']}: {reason}")
+            continue
+
+        pos = engine.open_position(opp, available)
+        if pos:
+            send_alert(format_position_open(pos))
+            available -= pos["usd_value"]
+
+        time.sleep(1)  # Rate limit buffer
+
+    # Final status
+    status = engine.get_status()
+    print(f"\n[STATUS] {status['positions']} positions open, {status['total_trades']} total trades")
 
 
-def place_market_order(exchange, symbol, side, amount):
-    """Place a market order."""
-    print(f"\n[ORDER] {side.upper()} {amount} {symbol}")
-    order = exchange.create_order(
-        symbol=symbol,
-        type="market",
-        side=side,
-        amount=amount,
-    )
-    print(f"  Order ID: {order['id']}")
-    print(f"  Status: {order['status']}")
-    print(f"  Filled: {order.get('filled', 0)} @ avg {order.get('average', 'N/A')}")
-    return order
+def status_mode(exchange, engine, pm):
+    """Show current bot status."""
+    report = pm.get_risk_report()
+    print(format_risk_report(report))
+
+    if engine.positions:
+        print(f"\nOpen positions: {len(engine.positions)}")
+        for sym, pos in engine.positions.items():
+            print(f"  {sym}: ${pos['usd_value']:.2f} @ {pos['entry_annualized']:+.1f}% APY")
+    else:
+        print("\nNo open positions")
+
+    if engine.trade_log:
+        print(f"\nTrade history: {len(engine.trade_log)} trades")
+        for log in engine.trade_log[-5:]:
+            print(f"  {log['timestamp'][:19]} {log['action']} {log['symbol']} ${log['usd_value']:.2f}")
 
 
-def place_limit_order(exchange, symbol, side, amount, price):
-    """Place a limit order."""
-    print(f"\n[ORDER] {side.upper()} {amount} {symbol} @ {price}")
-    order = exchange.create_order(
-        symbol=symbol,
-        type="limit",
-        side=side,
-        amount=amount,
-        price=price,
-    )
-    print(f"  Order ID: {order['id']}")
-    print(f"  Status: {order['status']}")
-    return order
+def close_all_mode(exchange, engine):
+    """Close all open positions."""
+    if not engine.positions:
+        print("No positions to close")
+        return
+
+    print(f"Closing {len(engine.positions)} positions...")
+    for symbol in list(engine.positions.keys()):
+        result = engine.close_position(symbol, reason="close_all")
+        if result:
+            send_alert(format_position_close(engine.positions.get(symbol, {}), "manual close_all"))
+
+
+def main():
+    print("=" * 60)
+    print("  CRYPTO TRADING BOT — Funding Rate Arbitrage")
+    print(f"  Exchange: {EXCHANGE_ID}  |  Sandbox: {SANDBOX}")
+    print("=" * 60)
+
+    # Initialize
+    exchange = create_exchange()
+    print(f"Connected to {EXCHANGE_ID} — {len(exchange.markets)} markets loaded")
+
+    engine = FundingArbEngine(exchange)
+    pm = PositionManager(exchange)
+
+    # Parse command
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
+
+    if cmd == "--trade":
+        trade_mode(exchange, engine, pm)
+    elif cmd == "--status":
+        status_mode(exchange, engine, pm)
+    elif cmd == "--close-all":
+        close_all_mode(exchange, engine)
+    elif cmd == "--scan" or cmd == "scan":
+        scan_mode(engine)
+    else:
+        print(f"\nUsage:")
+        print(f"  python main.py              # Scan opportunities")
+        print(f"  python main.py --trade      # Auto-trade")
+        print(f"  python main.py --status     # Bot status")
+        print(f"  python main.py --close-all  # Close all positions")
 
 
 if __name__ == "__main__":
-    print("=== Bybit Trading Bot — Phase 1 ===\n")
-
-    # 1. Connect
-    exchange = create_exchange()
-    print(f"Connected to {EXCHANGE_ID}")
-    print(f"Markets loaded: {len(exchange.markets)}")
-
-    # 2. Check balance
-    get_balance(exchange)
-
-    # 3. Scan funding rates
-    print("\n=== Top Funding Rates (Perp/USDT) ===")
-    rates = get_funding_rates(exchange)
-    for r in rates:
-        direction = "LONG" if r["fundingRate"] > 0 else "SHORT"
-        print(f"  {r['symbol']:15s}  rate={r['fundingRate']:+.6f}  "
-              f"APY={r['annualized']:+.1f}%  direction={direction}")
-
-    print("\n[OK] Phase 1 complete — API connection working.")
+    main()
