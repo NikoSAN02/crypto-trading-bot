@@ -17,6 +17,10 @@ import time
 import os
 import urllib.request
 from datetime import datetime, timezone, timedelta
+from strategies.enhanced_strategies import (
+    RateTracker, FundingTimer, should_enter_enhanced, should_exit_enhanced,
+    fetch_cross_exchange_rates
+)
 
 
 class PaperTrader:
@@ -29,6 +33,10 @@ class PaperTrader:
         self.trade_log = []
         self.balance_history = [{"time": datetime.now(timezone.utc).isoformat(), "balance": starting_balance}]
         self.state_file = os.path.expanduser("~/projects/crypto-trading-bot/paper_state.json")
+
+        # Enhanced features
+        self.rate_tracker = RateTracker(max_history=12)
+        self.funding_timer = FundingTimer()
 
         # Risk config (same as real bot)
         self.max_position_usd = 50
@@ -171,19 +179,30 @@ class PaperTrader:
         }
 
     def find_opportunities(self, funding):
-        """Find best funding arb opportunities."""
+        """Find best funding arb opportunities with enhanced checks."""
         opportunities = []
         for r in funding:
-            if r["apy"] < 15:
+            if r["apy"] < 10:
                 continue
             if r["symbol"] in self.positions:
                 continue
             if r["price"] <= 0:
                 continue
-            # Skip obvious pump and dumps (24h change > 100%)
-            if abs(r["change_24h"]) > 100:
+
+            # Record rate for tracking
+            self.rate_tracker.record(r["symbol"], r["funding_rate"])
+
+            # Enhanced entry check
+            should_enter, reason, confidence = should_enter_enhanced(r, self.rate_tracker)
+            if not should_enter:
                 continue
+
+            r["confidence"] = confidence
+            r["entry_reason"] = reason
             opportunities.append(r)
+
+        # Sort by confidence first, then APY
+        opportunities.sort(key=lambda x: (x.get("confidence", 0), x["apy"]), reverse=True)
         return opportunities[:5]
 
     def open_position(self, opp):
@@ -210,6 +229,8 @@ class PaperTrader:
             "usd_value": usd_value,
             "fee_paid": fee,
             "funding_collected": 0,
+            "confidence": opp.get("confidence", 0.5),
+            "entry_reason": opp.get("entry_reason", ""),
         }
         self.positions[opp["symbol"]] = position
         self.balance -= fee  # Deduct fee from balance
@@ -283,7 +304,7 @@ class PaperTrader:
                 pos["funding_collected"] += abs(payment)
 
     def check_exit_conditions(self, funding_rates):
-        """Check if any positions should be closed."""
+        """Check if any positions should be closed using enhanced exit logic."""
         rate_map = {r["symbol"]: r for r in funding_rates}
         to_close = []
 
@@ -291,14 +312,19 @@ class PaperTrader:
             rate_info = rate_map.get(symbol)
             if not rate_info:
                 continue
-            current_apy = rate_info["apy"]
 
-            # Exit if funding rate dropped below 5% APY
-            if current_apy < 5:
-                to_close.append((symbol, f"APY dropped to {current_apy:.0f}%", rate_info["price"]))
-            # Exit if funding rate flipped sign
-            elif (pos["entry_apy"] > 0 and current_apy < 0) or (pos["entry_apy"] < 0 and current_apy > 0):
-                to_close.append((symbol, f"APY flipped sign ({current_apy:+.0f}%)", rate_info["price"]))
+            current_rate = rate_info["funding_rate"]
+
+            # Record for tracking
+            self.rate_tracker.record(symbol, current_rate)
+
+            # Enhanced exit check
+            should_exit, reason = should_exit_enhanced(
+                pos, current_rate, pos["entry_funding_rate"], pos["funding_collected"]
+            )
+
+            if should_exit:
+                to_close.append((symbol, reason, rate_info["price"]))
 
         return to_close
 
@@ -361,14 +387,22 @@ class PaperTrader:
             for r in signal.get("reasons", [])[:3]:
                 print(f"    - {r}")
 
+        # Funding timing
+        timing = self.funding_timer.get_timing_info()
+        print(f"\n  Timing: {timing}")
+
         # Open positions
         if self.positions:
             print(f"\n  Open Positions:")
             for sym, pos in self.positions.items():
                 held_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(
                     pos["entry_time"])).total_seconds() / 3600
+                stability = self.rate_tracker.get_stability(sym)
+                momentum = self.rate_tracker.get_momentum(sym)
+                conf = pos.get("confidence", 0)
                 print(f"    {sym:<10} ${pos['usd_value']:.0f} @ {pos['entry_apy']:+.0f}% APY  "
-                      f"held: {held_hours:.0f}h  funding collected: ${pos['funding_collected']:.2f}")
+                      f"held: {held_hours:.0f}h  funding: ${pos['funding_collected']:.2f}  "
+                      f"conf: {conf:.0%}  stable: {stability:.0%}  trend: {momentum}")
         else:
             print("\n  No open positions")
 
@@ -445,6 +479,23 @@ class PaperTrader:
         self.save_state()
 
         self.print_dashboard(signal)
+
+        # Cross-exchange arb scan (every 6 cycles)
+        if not hasattr(self, '_cycle_count'):
+            self._cycle_count = 0
+        self._cycle_count += 1
+        if self._cycle_count % 6 == 0:
+            print("\n  Cross-Exchange Arb Scan:")
+            try:
+                xrate = fetch_cross_exchange_rates()
+                if xrate["spreads"]:
+                    for s in xrate["spreads"][:5]:
+                        print(f"    {s['coin']:<10} Bybit: {s['bybit_apy']:+.0f}%  Binance: {s['binance_apy']:+.0f}%  "
+                              f"Spread: {s['spread']:+.0f}%  -> {s['best_exchange']}")
+                else:
+                    print("    No significant spreads found")
+            except Exception as e:
+                print(f"    Error: {e}")
 
     def run_live(self, interval_seconds=300):
         """Continuous paper trading."""
