@@ -4,3 +4,6 @@ __pycache__/
 config.py
 venv/
 *.log
+*.log
+hybrid_state.json
+paper_state.json

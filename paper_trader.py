@@ -49,12 +49,14 @@ class PaperTrader:
         self.liquidation_buffer_pct = 50  # Close if price moves 50% toward liquidation
         self.max_leverage_drawdown_pct = 30  # Hard stop: close all if equity drops 30%
 
-        # Position config (wider net)
-        self.max_position_usd = 60  # Larger positions with leverage
-        self.max_positions = 5  # More diversification
-        self.reserve_pct = 15  # Less idle cash, more deployed
+        # Position config — smaller, fewer, higher quality
+        self.max_position_usd = 45  # $15 margin × 3x leverage
+        self.max_positions = 3  # Focus on quality, not quantity
+        self.reserve_pct = 20  # Keep 20% cash buffer
         self.slippage_pct = 0.1
         self.fee_pct = 0.06
+        self.min_hold_hours = 8  # Must collect at least 1 funding before exiting
+        self.max_price_loss_pct = 5  # Close if price drops 5% against us (15% loss at 3x)
 
         # Risk tracking
         self.peak_balance = starting_balance
@@ -203,10 +205,10 @@ class PaperTrader:
         }
 
     def find_opportunities(self, funding):
-        """Find best funding arb opportunities with enhanced checks."""
+        """Find best funding arb opportunities — high APY only."""
         opportunities = []
         for r in funding:
-            if r["apy"] < 10:
+            if r["apy"] < 80:  # Minimum 80% APY — below this, fees eat profit
                 continue
             if r["symbol"] in self.positions:
                 continue
@@ -221,13 +223,17 @@ class PaperTrader:
             if not should_enter:
                 continue
 
+            # Extra filter: skip volatile coins (we're holding 8+ hours)
+            if abs(r.get("change_24h", 0)) > 20:
+                continue
+
             r["confidence"] = confidence
             r["entry_reason"] = reason
             opportunities.append(r)
 
-        # Sort by confidence first, then APY
-        opportunities.sort(key=lambda x: (x.get("confidence", 0), x["apy"]), reverse=True)
-        return opportunities[:5]
+        # Sort by APY first (we want highest funding), then confidence
+        opportunities.sort(key=lambda x: x["apy"], reverse=True)
+        return opportunities[:3]  # Max 3 candidates
 
     def open_position(self, opp):
         """Paper-trade: open a leveraged funding arb position with volatility-adjusted sizing."""
@@ -380,9 +386,10 @@ class PaperTrader:
             self.total_funding_collected += abs(payment)
 
     def check_exit_conditions(self, funding_rates):
-        """Check if any positions should be closed using enhanced exit logic."""
+        """Check if any positions should be closed — with minimum hold time enforcement."""
         rate_map = {r["symbol"]: r for r in funding_rates}
         to_close = []
+        now = datetime.now(timezone.utc)
 
         for symbol, pos in self.positions.items():
             rate_info = rate_map.get(symbol)
@@ -392,8 +399,43 @@ class PaperTrader:
             current_rate = rate_info["funding_rate"]
             current_price = rate_info["price"]
 
+            # Calculate hold time
+            entry_time = datetime.fromisoformat(pos["entry_time"])
+            held_hours = (now - entry_time).total_seconds() / 3600
+
             # Record for tracking
             self.rate_tracker.record(symbol, current_rate)
+
+            # === MINIMUM HOLD TIME — no exit before 1 funding window ===
+            if held_hours < self.min_hold_hours:
+                # Override exits during hold: liquidation OR price stop-loss
+                entry_price = pos["entry_price"]
+                price_move_pct = abs(current_price - entry_price) / entry_price * 100
+                adverse_move = ((entry_price - current_price) / entry_price * 100)  # negative = price dropped
+
+                # Liquidation protection
+                liq_threshold = 100 / pos.get("leverage", 3) * 0.6
+                if price_move_pct > liq_threshold:
+                    to_close.append((
+                        symbol,
+                        f"LIQ PROTECT: price moved {price_move_pct:.0f}%",
+                        current_price
+                    ))
+                    continue
+
+                # Price stop-loss — close if losing too much (even before funding)
+                if adverse_move > self.max_price_loss_pct:
+                    loss_usd = pos["margin"] * (adverse_move / 100) * pos.get("leverage", 3)
+                    to_close.append((
+                        symbol,
+                        f"STOP LOSS: price dropped {adverse_move:.1f}% (~${loss_usd:.2f} loss)",
+                        current_price
+                    ))
+                    continue
+
+                continue  # Hold — no other exits during this period
+
+            # === AFTER MINIMUM HOLD — normal exit logic ===
 
             # Enhanced exit check
             should_exit, reason = should_exit_enhanced(
@@ -407,10 +449,7 @@ class PaperTrader:
             # Liquidation protection for leveraged positions
             entry_price = pos["entry_price"]
             price_move_pct = abs(current_price - entry_price) / entry_price * 100
-
-            # At 3x leverage, liquidation is at ~33% adverse move
-            # We close at 20% adverse move (before liquidation)
-            liq_threshold = 100 / pos.get("leverage", 3) * 0.6  # 60% of way to liquidation
+            liq_threshold = 100 / pos.get("leverage", 3) * 0.6
             if price_move_pct > liq_threshold:
                 to_close.append((
                     symbol,
@@ -605,13 +644,13 @@ class PaperTrader:
             if opened == 0 and not self.positions:
                 print("  No suitable opportunities found")
         elif sig == "NEUTRAL":
-            # Only open if very high APY
+            # Only open if APY is very high (150%+) — don't waste capital in neutral market
             opportunities = self.find_opportunities(funding)
-            high_apy = [o for o in opportunities if o["apy"] > 50]
+            high_apy = [o for o in opportunities if o["apy"] > 150]
             if high_apy and len(self.positions) < self.max_positions:
                 pos = self.open_position(high_apy[0])
                 if pos:
-                    print(f"  OPENED {high_apy[0]['symbol']}: ${pos['usd_value']:.0f} @ {high_apy[0]['apy']:+.0f}% APY (high APY override)")
+                    print(f"  OPENED {high_apy[0]['symbol']}: ${pos['usd_value']:.0f} @ {high_apy[0]['apy']:+.0f}% APY (high APY only)")
 
         # Record balance
         self.balance_history.append({

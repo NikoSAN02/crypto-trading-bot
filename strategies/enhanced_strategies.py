@@ -290,10 +290,13 @@ def should_enter_enhanced(opp, rate_tracker, timing_check=True):
             confidence -= 0.1
             reasons.append(f"long wait ({mins}m to funding)")
 
-    # 6. Minimum APY based on confidence
-    min_apy = 15 if confidence > 0.6 else 25 if confidence > 0.4 else 50
+    # 6. Minimum APY — must be high enough to beat fees
+    # At $15 margin × 3x = $45 notional, fees = $0.054 round-trip
+    # Need at least 2 funding payments to be profitable
+    # 80% APY × $45 × (8/24/365) × 2 = $0.07 > $0.054 fees ✓
+    min_apy = 80 if confidence > 0.4 else 120
     if apy < min_apy:
-        return False, f"APY {apy:.0f}% too low for confidence {confidence:.0%}", confidence
+        return False, f"APY {apy:.0f}% too low (need {min_apy}%+)", confidence
 
     confidence = max(0.1, min(0.95, confidence))
     reason = " | ".join(reasons) if reasons else "OK"
@@ -302,7 +305,7 @@ def should_enter_enhanced(opp, rate_tracker, timing_check=True):
 
 def should_exit_enhanced(pos, current_rate, entry_rate, funding_collected):
     """
-    Enhanced exit check — trailing stop on rate decay.
+    Enhanced exit check — hold through funding, only exit when truly dead.
 
     Returns: (should_exit: bool, reason: str)
     """
@@ -310,24 +313,23 @@ def should_exit_enhanced(pos, current_rate, entry_rate, funding_collected):
     entry_apy = pos["entry_apy"]
     current_apy = current_rate * 3 * 365 * 100
 
-    # 1. Rate dropped below minimum
-    if current_apy < 5:
-        return True, f"APY below minimum ({current_apy:.0f}%)"
+    # 1. Rate dropped below minimum — dead position
+    if current_apy < 20:
+        return True, f"APY collapsed ({current_apy:.0f}%)"
 
-    # 2. Rate dropped 60% from entry (trailing stop)
+    # 2. Rate dropped 70% from entry (was 60% — more patient)
     if entry_apy > 0 and current_apy > 0:
         decay = 1 - (current_apy / entry_apy)
-        if decay > 0.6:
-            return True, f"Rate decayed {decay:.0%} from entry ({entry_apy:.0f}% -> {current_apy:.0f}%)"
+        if decay > 0.70:
+            return True, f"Rate decayed {decay:.0%} ({entry_apy:.0f}% → {current_apy:.0f}%)"
 
     # 3. Rate flipped sign
     if (entry_rate > 0 and current_rate < 0) or (entry_rate < 0 and current_rate > 0):
-        return True, f"Rate flipped sign ({current_rate:+.6f})"
+        return True, f"Rate flipped ({current_rate:+.6f})"
 
-    # 4. Funding collected covers fees — take profit
-    if funding_collected > pos.get("fee_paid", 0) * 3:
-        # We've collected 3x fees — safe profit, can exit if rate declining
-        if current_apy < entry_apy * 0.5:
-            return True, f"Profit secured (${funding_collected:.2f}), rate declining"
+    # 4. Funding collected 3x fees AND rate declining — take profit
+    fees = pos.get("fee_paid", 0) * 2  # entry + estimated exit fee
+    if funding_collected > fees * 3 and current_apy < entry_apy * 0.4:
+        return True, f"Profit secured (${funding_collected:.2f}), rate dying"
 
     return False, "Hold"

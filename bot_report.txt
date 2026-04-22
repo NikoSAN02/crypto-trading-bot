@@ -1,25 +1,24 @@
-============================================================
-  TRADING BOT PERFORMANCE REPORT
-  2026-04-22 00:05 UTC
-============================================================
+📊 Hybrid Trading Bot — Active
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Starting Balance:  $200.00
-Current Balance:   $582.87
-P&L:               $+382.87 (+191.4%)
-Total Funding:     $38.89
-Win Rate:          60% (3W / 2L)
-Sharpe Ratio:      5.03
-Max Drawdown:      0.0%
+Starting Balance: $200.00
+Architecture: Arb + Signal Hunter (v3.0)
+Started: 2026-04-22 03:48 UTC
 
-OPEN POSITIONS:
-  M: $180 notional @ 98% APY | Funding: $28.98
-  XAU: $180 notional @ 20% APY | Funding: $0.09
+TIER 1: FUNDING ARB (60% / $120)
+  Delta-neutral: Long Exchange A + Short Exchange B
+  Collects funding rate spread, zero price risk
+  Min spread: 15% APY to enter, exit at 5%
+  
+TIER 2: SIGNAL HUNTER (40% / $80)
+  5-signal composite scoring (0-100):
+  - Volume anomaly (Binance) — weight 25%
+  - Funding extremes (Binance Futures) — weight 25%
+  - OI divergence (Binance Futures) — weight 20%
+  - Long/Short ratio (Binance Futures) — weight 15%
+  - Fear & Greed (Alternative.me) — weight 15%
+  
+  Entry: Score >65, stop loss 5%, take profit 10%
+  Min hold: 2 hours, max hold: 24 hours
 
-CLOSED TRADES:
-  NAORIS: $+5.25 — Rate decayed 98% from entry (232% -> 5%)
-  XAU: $+0.49 — Profit secured ($0.22), rate declining
-  BEAT: $-2.75 — Profit secured ($0.38), rate declining
-  RAVE: $-2.95 — Profit secured ($0.24), rate declining
-  ARIA: $+7.61 — Rate decayed 89% from entry (52% -> 5%)
-
-============================================================
+Running: 5-minute cycles
