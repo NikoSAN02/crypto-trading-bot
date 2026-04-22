@@ -1,0 +1,25 @@
+============================================================
+  TRADING BOT PERFORMANCE REPORT
+  2026-04-22 00:05 UTC
+============================================================
+
+Starting Balance:  $200.00
+Current Balance:   $582.87
+P&L:               $+382.87 (+191.4%)
+Total Funding:     $38.89
+Win Rate:          60% (3W / 2L)
+Sharpe Ratio:      5.03
+Max Drawdown:      0.0%
+
+OPEN POSITIONS:
+  M: $180 notional @ 98% APY | Funding: $28.98
+  XAU: $180 notional @ 20% APY | Funding: $0.09
+
+CLOSED TRADES:
+  NAORIS: $+5.25 — Rate decayed 98% from entry (232% -> 5%)
+  XAU: $+0.49 — Profit secured ($0.22), rate declining
+  BEAT: $-2.75 — Profit secured ($0.38), rate declining
+  RAVE: $-2.95 — Profit secured ($0.24), rate declining
+  ARIA: $+7.61 — Rate decayed 89% from entry (52% -> 5%)
+
+============================================================

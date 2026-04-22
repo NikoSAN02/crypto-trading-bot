@@ -342,15 +342,36 @@ class PaperTrader:
         return {"total_pnl": total_pnl, "price_pnl": price_pnl, "funding_pnl": funding_pnl}
 
     def collect_funding(self, funding_rates):
-        """Simulate funding payment collection — amplified by leverage."""
+        """Simulate funding payment collection — only at Bybit's 8-hour funding windows."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        current_hour = now.hour
+
+        # Bybit funding hours: 00:00, 08:00, 16:00 UTC
+        # Only collect if we're within 10 minutes after a funding time
+        FUNDING_HOURS = [0, 8, 16]
+        is_funding_time = any(
+            current_hour == h and now.minute < 10
+            for h in FUNDING_HOURS
+        )
+
+        if not is_funding_time:
+            return  # Not a funding window — skip collection
+
+        # Prevent double-collection in same window
+        funding_key = f"{now.strftime('%Y-%m-%d')}_{current_hour}"
+        if getattr(self, '_last_funding_key', None) == funding_key:
+            return
+        self._last_funding_key = funding_key
+
         rate_map = {r["symbol"]: r for r in funding_rates}
         for symbol, pos in self.positions.items():
             rate_info = rate_map.get(symbol)
             if not rate_info:
                 continue
             # Funding is paid on NOTIONAL value (margin * leverage)
-            notional = pos["usd_value"]  # This is already the leveraged notional
-            # 8-hour funding payment
+            notional = pos["usd_value"]
+            # 8-hour funding payment (one per window)
             payment = notional * rate_info["funding_rate"]
             if pos["entry_funding_rate"] > 0:
                 pos["funding_collected"] += payment
