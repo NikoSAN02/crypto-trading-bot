@@ -227,12 +227,20 @@ class HybridTrader:
             self.balance += funding
 
     def check_arb_exits(self):
-        """Check if arb positions should be closed."""
+        """Check if arb positions should be closed — minimum 8h hold enforced."""
         to_close = []
+        now = datetime.now(timezone.utc)
+
         fresh_opps = self.scan_arb_opportunities()
         opp_map = {o["symbol"]: o for o in fresh_opps}
 
         for symbol, pos in self.arb_positions.items():
+            held_hours = (now - datetime.fromisoformat(pos["entry_time"])).total_seconds() / 3600
+
+            # MUST hold at least 8 hours (1 funding window) before any exit
+            if held_hours < 8:
+                continue
+
             # Check if spread still exists
             if symbol in opp_map:
                 current_spread = opp_map[symbol]["spread_apy"]
@@ -241,15 +249,6 @@ class HybridTrader:
             else:
                 # Spread disappeared (one side went below threshold)
                 to_close.append((symbol, "Spread disappeared"))
-
-            # Hold time check — minimum 8 hours (1 funding window)
-            held_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(pos["entry_time"])).total_seconds() / 3600
-            if held_hours < 8 and not to_close:
-                # Skip exit checks during hold period (unless spread collapsed)
-                if to_close and to_close[-1][0] == symbol:
-                    pass  # Already marked for close
-                else:
-                    continue
 
         return to_close
 
